@@ -1,0 +1,1327 @@
+-- @atlcompiler atl2006
+module Model2Maude;
+create OUT : Maude from IN : MM, INMM : Ecore, INPAR : Parameter;
+-- create OUT : Maude from IN : Ecore, INPAR : Parameter;
+
+-- ATL BUGS:
+-- No me deja asignar dos elementos iguales en una lista
+-- No me deja insertar en una lista en el bloque do en un sitio que no sea el final
+
+-- ECORE PROBLEMS:
+-- Hay metamodelos que tienen MOF!EDataType en en lugar de MM!EDataType, y estos no funcionan de forma normal:
+--		no tienen las operaciones definidas como oclIsTypeOf y demas
+-- Me obligo a poner en muchos helpers OclAny para que entrarn los elementos del metamodelo Ecore
+--		(no funionaban con contextos como MM!EClassifier y demas, no se si sera tb por el uso de MOF)
+-- eClass() no funciona para los enumLiteral
+-- AllInstances() no funciona para los enumLiteral ni para los EClass()
+
+-- OTROS:
+-- La comprobacion de que si no existe el objeto en el modelo (es un objeto externo) lo crea
+-- 		es un precio a pagar alto en modelos grandes, puesto que usa allIntances mas de una vez
+-- 		En cambio si no se hiciera, podria tener dangling references, pues no existiria el objeto destino
+--		(y es necesario en por ejemplo el subtyping donde los EDataTypes no estani incluidos en el metamodelo)
+--- Los external objects tiene sentido cuando el metamodelo de ese objeto esta cargado. Asi solo funciona bien
+---		para los elementos del metamodelo Ecore, que es el unico que importa 
+
+-- Para conseguir el nombre del modelo:
+--		ASMModel model;
+-- 		model.getName(); (ver que da, y si eso a�adir path relativo o algo)
+-- Conseguir el nombre del metamodelo: 
+--		model.getMetamodel().getName()
+
+helper def : allObjects : Sequence(MM!EObject) = MM!EObject.allInstancesFrom('IN');
+
+helper def : modelName : String = thisModule.getParameter('modelName').processSpecModChars().processSpecOpChars();
+helper def : metamodelName : String = 
+	let rootPackages : Sequence(Ecore!EPackage) = 
+		Ecore!EPackage.allInstancesFrom('INMM')->select(p | p.eSuperPackage.oclIsUndefined()) in
+		'@' + rootPackages->first().name.processSpecModChars().processSpecOpChars() + '@'
+--			'@' + thisModule.getParameter('metamodelName').processSpecModChars().processSpecOpChars() + '@'
+;
+
+helper def : cont : Integer = 0;
+
+helper def : objectOperator : String = '<_:_|_>';
+helper def : modelOperator : String = '_`{_`}';
+helper def : objSetOperator : String = '__';
+--helper def : setOperator : String = '_`,_';
+helper def : setSfsOperator : String = '_#_';
+helper def : sfsOperator : String = '_:_';
+helper def : emptySetOperator : String = 'empty';
+helper def : emptyObjectSetOperator : String = 'none';
+--helper def : setContainerOperator : String = 'Set`{_`}';
+--helper def : sequenceContainerOperator : String = 'Sequence`[_`]';
+--helper def : bagContainerOperator : String = 'Bag`{_`}';
+--helper def : orderedSetContainerOperator : String = 'OrderedSet`[_`]';
+helper def : setOperator : String = 'Set`{_`}'; --'Set_';
+helper def : sequenceOperator : String = 'Sequence`{_`}'; --'Sequence_';
+helper def : bagOperator : String = 'Bag`{_`}'; --'Bag_';
+helper def : orderedSetOperator : String = 'OrderedSet`{_`}'; --'OrderedSet_';
+--helper def : orderedContainerOperator : String = '`[_`]';
+--helper def : notOrderedContainerOperator : String = '`{_`}';
+
+helper def : objectSort : Maude!Sort = OclUndefined;
+helper def : objectSetSort : Maude!Sort = OclUndefined;
+helper def : objSet : Maude!RecTerm = OclUndefined;
+helper def : sfiSetSort : Maude!Sort = OclUndefined;
+helper def : metamodelModule : Maude!SModule = OclUndefined;
+helper def : auxiliaryModule : Maude!SModule = OclUndefined;
+helper def : stringSort : Maude!Sort = OclUndefined;
+helper def : intSort : Maude!Sort = OclUndefined;
+helper def : boolSort : Maude!Sort = OclUndefined;
+helper def : floatSort : Maude!Sort = OclUndefined;
+helper def : dataTypeInstanceSort : Maude!Sort = OclUndefined;
+helper def : enumLiteralSort : Maude!Sort = OclUndefined;
+helper def : orderedSetSort : Maude!Sort = OclUndefined; 
+helper def : setSort : Maude!Sort = OclUndefined; 
+helper def : sequenceSort : Maude!Sort = OclUndefined; 
+helper def : bagSort : Maude!Sort = OclUndefined;
+helper def : listSort : Maude!Sort = OclUndefined;
+helper def : mSetSort : Maude!Sort = OclUndefined;
+helper def : attInstanceSort : Maude!Sort = OclUndefined;
+helper def : refInstanceSort : Maude!Sort = OclUndefined;
+helper def : refSort : Maude!Sort = OclUndefined;
+helper def : attSort : Maude!Sort = OclUndefined;
+helper def : itemListOrdSort : Maude!Sort = OclUndefined;
+helper def : itemListSort : Maude!Sort = OclUndefined;
+
+helper def : getParameter(name : String) : String =
+	Parameter!Parameter.allInstances()->select(p | p.name = name)->first().value;
+
+helper context String def : processSpecOpChars() : String =
+    self.regexReplaceAll('`','@\'@').regexReplaceAll('_','@-@').regexReplaceAll(' ','@#@');
+
+helper context String def : processSpecModChars() : String =
+   self.replaceAll('{','-').replaceAll('}','-').replaceAll('(','-').replaceAll(')','-').replaceAll('[','-')
+	.replaceAll(']','-').replaceAll(',','-').replaceAll(' ','-');
+
+--- Diferenciamos entre los nombres (maudePackageName, maudeClassname,..) pues ahora todos
+--- tienen el mismo contexto: OclAny. No podemos poner MM!EPackage y demas porque los 
+--- modelos conformes al MM Ecore (metamodelos) sus metaclases son MOF!EClass y demas y no funcionan
+--- los helpers definidos para ellos
+
+helper context OclAny def : maudePackageName() : String = 
+	if (self.eSuperPackage.oclIsUndefined())
+	then if self.name.oclIsUndefined() then 'NoNamed' else self.name.processSpecOpChars() endif 
+		--- + '@' + thisModule.metamodelName  
+	else if self.name.oclIsUndefined() then 'NoNamed' else self.name.processSpecOpChars() endif 
+		+ '@' + self.eSuperPackage.maudePackageName()  
+	endif;
+
+helper context OclAny def : maudeClassifierName() : String = 
+	if (self.ePackage.oclIsUndefined())
+	then self.name.processSpecOpChars()
+	else self.name.processSpecOpChars() + '@' + self.ePackage.maudePackageName()  
+	endif;
+
+helper context OclAny def : maudeStrFeatName() : String = 
+	self.name.processSpecOpChars() + '@' + self.eContainingClass.maudeClassifierName();
+
+-- Como puede que no se consiga llamar este helper de todos lados (Los Enumeration que no son de Ecore), cada vez que se use un literal hay 
+-- que a�adirle .processSpecOpChars()
+helper context OclAny def : maudeLiteralName(enum : MM!EEnum) : String = 
+	self.name.processSpecOpChars() + '@' + enum.maudeClassifierName();
+
+helper context OclAny def: oid() : String =
+	'\'' + self.toString();
+
+--helper context MM!EObject def: sfs() : Sequence(MM!EStructuralFeature) =
+--	self.eClass.eAllStructuralFeatures();
+
+helper context OclAny def: atts() : Sequence(MM!EAttribute) =
+	self.eClass().eAllAttributes;
+
+helper context OclAny def: refs() : Sequence(MM!EReference) =
+	self.eClass().eAllReferences;
+
+--helper context MM!EStructuralFeature def: kindString() : String =
+--	if self.isMany()
+--	then if self.isOrdered()
+--		then if self.isUnique()
+--			then 'OrderedSet'
+--			else 'List' endif 
+--		else if self.isUnique()
+--			then 'Set'
+--			else 'Bag' endif 
+--		endif
+--	else if (self.lowerBound = 0)
+--		then 'Maybe'
+--		else 'Simple' endif
+--	endif;
+
+--helper context MM!EStructuralFeature def: isOrderedSet() : Boolean =
+--	self.isMany() and self.isOrdered and self.isUnique();
+--
+--helper context MM!EStructuralFeature def: isList() : Boolean =
+--	self.isMany() and self.isOrdered and (not self.isUnique());
+--
+--helper context MM!EStructuralFeature def: isSet() : Boolean =
+--	self.isMany() and (not self.isOrdered) and self.isUnique();
+--
+--helper context MM!EStructuralFeature def: isBag() : Boolean =
+--	self.isMany() and (not self.isOrdered) and (not self.isUnique());
+	
+--helper context OclAny def: refKind() : Maude!Sort =
+--	if self.isMany()
+--	then if self.isOrdered()
+--		then if self.isUnique()
+--			then thisModule.refOrderedSetSort
+--			else thisModule.refListSort endif 
+--		else if self.isUnique()
+--			then thisModule.refSetSort
+--			else thisModule.refBagSort endif 
+--		endif
+--	else if (self.lowerBound = 0)
+--		then thisModule.refMaybeSort
+--		else thisModule.refSimpleSort endif
+--	endif;
+--
+--helper context OclAny def: attKind() : Maude!Sort =
+--	if self.isMany()
+--	then if self.isOrdered()
+--		then if self.isUnique()
+--			then thisModule.attOrderedSetSort
+--			else thisModule.attListSort endif 
+--		else if self.isUnique()
+--			then thisModule.attSetSort
+--			else thisModule.attBagSort endif 
+--		endif
+--	else if (self.lowerBound = 0)
+--		then thisModule.attMaybeSort
+--		else thisModule.attSimpleSort endif
+--	endif;
+
+helper context OclAny def: refInstanceKind() : Maude!Sort =
+	if self.isMany()
+	then if self.isOrdered()
+		then if self.isUnique()
+			then thisModule.refInstOrderedSetSort
+			else thisModule.refInstListSort endif 
+		else if self.isUnique()
+			then thisModule.refInstSetSort
+			else thisModule.refInstBagSort endif 
+		endif
+	else if (self.lowerBound = 0)
+		then thisModule.refInstMaybeSort
+		else thisModule.refInstSimpleSort endif
+	endif;
+
+--helper context OclAny def: attInstanceKind() : Maude!Sort =
+--	if self.isMany()
+--	then if self.isOrdered()
+--		then if self.isUnique()
+--			then thisModule.attInstOrderedSetSort
+--			else thisModule.attInstListSort endif 
+--		else if self.isUnique()
+--			then thisModule.attInstSetSort
+--			else thisModule.attInstBagSort endif 
+--		endif
+--	else if (self.lowerBound = 0)
+--		then thisModule.attInstMaybeSort
+--		else thisModule.attInstSimpleSort endif
+--	endif;
+
+-- Solo para las referencias
+--helper context OclAny def: oidKind() : Maude!Sort =
+--	if self.isMany()
+--	then if self.isOrdered()
+--		then if self.isUnique()
+--			then thisModule.oidOrderedSetSort
+--			else thisModule.oidListSort endif 
+--		else if self.isUnique()
+--			then thisModule.oidSetSort
+--			else thisModule.oidBagSort endif 
+--		endif
+--	else if (self.lowerBound = 0)
+--		then thisModule.oidMaybeSort
+--		else thisModule.oidSort endif
+--	endif;
+
+-- Para los structuralFeatures
+helper context OclAny def: emptyCollection() : String =
+	if self.isMany()then 
+		if self.isOrdered() then 'mt-ord'
+--			if self.isUnique()
+--			then 'mtOrdSet'
+--			else 'nil' 
+--			endif 
+		else 'mt'
+--			if self.isUnique()
+--			then 'empty'
+--			else 'mtBag' 
+--			endif 
+		endif
+	else 'null' --'undefined'
+	endif;
+
+helper context OclAny def : typeOfCollection() : Maude!Sort =
+	if self.isOrdered()then thisModule.listSort --thisModule.listOrdSort
+--			if self.isUnique()then 
+--			else 
+--			endif 
+		else thisModule.mSetSort --thisModule.listSort
+--			if self.isUnique() then 
+--			else
+--			endif 
+	endif;
+
+helper context OclAny def : typeCollection() : Maude!Sort =
+	if self.isOrdered()then 
+			if self.isUnique()then thisModule.orderedSetSort
+			else thisModule.sequenceSort
+			endif 
+		else 
+			if self.isUnique() then thisModule.setSort
+			else thisModule.bagSort
+			endif 
+	endif;
+
+--helper context OclAny def : typeCollectionContainer() : Maude!Sort =
+--	if self.isOrdered()then thisModule.itemListOrdSort
+--	else thisModule.itemListSort	
+--	endif;
+
+helper context OclAny def : typeCollectionOperator() : String =
+		if self.isOrdered()then 
+			if self.isUnique()then thisModule.orderedSetOperator
+			else thisModule.sequenceOperator
+			endif 
+		else 
+			if self.isUnique() then thisModule.setOperator
+			else thisModule.bagOperator
+			endif 
+	endif;
+
+helper context OclAny def : typeCollectionContainerOperator() : String =
+	if self.isOrdered()then thisModule.orderedContainerOperator
+--			if self.isUnique()then thisModule.orderedSetContainerOperator
+--			else thisModule.sequenceContainerOperator
+--			endif 
+		else thisModule.notOrderedContainerOperator
+--			if self.isUnique() then thisModule.setContainerOperator
+--			else thisModule.bagContainerOperator
+--			endif 
+	endif;
+
+-- Para los structuralFeatures
+helper context OclAny def: opCollection() : String =
+	if self.isMany()
+	then 
+		if self.isOrdered()
+		then '_#_' --'_;_'
+--			if self.isUnique()
+--			then '_-`,_'
+--			else '__' 
+--			endif 
+		else '_;_' --'_#_'
+--			if self.isUnique()
+--			then '_`,_'
+--			else '_�_' 
+--			endif 
+		endif
+	else 
+		-- Se supone que no se llamara a esta funcion en este caso (ni Maybe ni Oid)
+		-- Por si acaso he definido la operacion en Maude, queda do un Oid te devuelve a el mismo
+		'self'
+	endif;
+
+		
+helper context Maude!Sort def: defaultValue() : String =
+	if (self = thisModule.boolSort) then  'false'
+	else if (self = thisModule.floatSort) then '0.0'
+		else if (self = thisModule.intSort) then '0'
+			else if (self = thisModule.stringSort) then '""'
+				else '@ATTUNDEFINED'
+				endif
+			endif
+		endif
+	endif;
+
+
+--- Solo el helper para los atriutos
+		--Esto si los creamos porque son los comunes
+helper context OclAny def: maudeBasicType() : Maude!Sort =
+	if (self.eType.name = 'EBoolean' or self.eType.name = 'Boolean' 
+			or self.eType.name = 'EBooleanObject') 
+	then thisModule.boolSort 
+	else if (self.eType.name = 'EFloat' or self.eType.name = 'Double' 
+			or self.eType.name = 'EDouble' or self.eType.name = 'EDoubleObject'
+			or self.eType.name = 'EFloatObject') 
+		then thisModule.floatSort
+		else if (self.eType.name = 'EInt' or self.eType.name = 'Integer'
+				or self.eType.name = 'EIntegerObject') 
+			then  thisModule.intSort
+			else if (self.eType.name = 'EString' or self.eType.name = 'String') 
+				then thisModule.stringSort
+					else if (self.eType.oclIsKindOf(MM!EEnum))  
+					then thisModule.enumerationSort(self)
+					else thisModule.dataTypeInstanceSort
+					endif
+				endif
+			endif
+		endif
+	endif;
+
+-- Solo para los atributos
+	--Esto los creamos cuando son necesarios porque no son tan comunes
+	--Le pasamos el nombre del tipo de dato primitivo (basico, no coleccion)
+helper context OclAny def: maudeType(basicType : String) : String =
+	if self.isMany()
+	then if self.isOrdered()
+		then if self.isUnique()
+			then 'OrderedSet{' + basicType + '}' 
+			else 'List{' + basicType + '}'endif 
+		else if self.isUnique()
+			then 'Set{' + basicType + '}'
+			else 'Bag{' + basicType + '}' endif 
+		endif
+	else if (self.lowerBound = 0)
+		then 'Maybe{'+ basicType + '}'
+		-- Se supone que no se llamara a esta funcion en este caso
+		else basicType endif
+	endif;
+	
+helper def: reverse(seq : Sequence(MM!EObject)) : Sequence(MM!EObject) =
+	if seq->isEmpty()
+	then Sequence{}
+	else thisModule.reverse(seq->subSequence(2,seq->size()))->append(seq->first())
+	endif;
+
+	
+--Precede la barra invertida (\) a todas las dobles comillas que aparezcan en la cadena
+--	(a modo de escape para poder tratarlos en Maude)
+helper context String def: escapeQuotes() : String =
+	--Esta hecho asi porque aunque replaceAll funciona con \, no regexReplaceAll
+	let finalString : String = self.split('"')->iterate(e; res : String = '' | res + e + '\\"') in
+	finalString->substring(1, finalString.size()-2);
+	
+
+--helper context MM!EAttribute def: kind() : String =
+--	'@Attribute' + self.kindString();
+--
+--helper context MM!EAttribute def: instanceKind() : String =
+--	'@AttributeInstance' + self.kindString();
+
+entrypoint rule Initialize(){
+	to
+		maudeSpec : Maude!MaudeSpec(
+			els <- Sequence{modelModule},
+			printableEls <- modelModule
+		),
+		modelModule : Maude!SModule(
+			name <- thisModule.modelName.toUpper(),
+			els <- Set{mmImport,  modelOp, modelEq} --mgImport
+		),
+		mmImport : Maude!ModImportation(
+			imports <- mmModExprImport,
+			mode <- #protecting
+		),
+		mmModExprImport : Maude!ModuleIdModExp(
+			"module" <- metamodelModule
+		),
+		-- MODULO DEL METAMODELO DONDE INCLUIREMOS LAS CLASES DEL METAMODELO NECESARIAS
+		metamodelModule : Maude!SModule(
+			name <- thisModule.metamodelName.toUpper()
+		),
+		modelOp : Maude!Operation(
+			name <- thisModule.modelName,
+			coarity <- modelSort
+		),
+		modelEq : Maude!Equation(
+			lhs <- modelCte,
+			rhs <- modelTerm
+		),
+		modelCte : Maude!Constant(
+			op <- modelOp.name,
+			type <- modelSort
+		),
+		modelTerm : Maude!RecTerm(
+			op <- thisModule.modelOperator,
+			type <- modelSort,
+			args <- Sequence{metamodelCte, objSet}
+		),
+		metamodelCte : Maude!Constant(
+			op <- thisModule.metamodelName,
+			type <- metamodelSort
+		),
+		objSet : Maude!RecTerm(
+			op <- thisModule.objSetOperator,
+			type <- objectSetSort,
+			args <- Sequence{emptyOs1, emptyOs2}
+		),
+		emptyOs1 : Maude!Constant(
+			op <- thisModule.emptyObjectSetOperator, 	
+			type <- thisModule.objectSetSort
+		),
+		emptyOs2 : Maude!Constant(
+			op <- thisModule.emptyObjectSetOperator, 	
+			type <- thisModule.objectSetSort
+		),
+		-- MODULO AUXILIAR DONDE ALMACENAREMOS TODOS LO QUE NO QUERAMOS IMPRIMIR
+--		auxiliaryModule : Maude!SModule(
+--			name <- 'MAUDELING'	
+--		),
+		--TIPOS PREDEFINIDOS NECESARIOS
+		objectSort : Maude!Sort(
+			name <- '@Object'
+--			"module" <- auxiliaryModule 	
+		),
+		objectSetSort : Maude!Sort(
+			name <- 'Set{@Object}'
+--			"module" <- auxiliaryModule 	
+		),
+		sfiSetSort : Maude!Sort(
+			name <- 'Set{@StructuralFeatureInstance}'
+--			"module" <- auxiliaryModule 
+		),
+		modelSort : Maude!Sort(
+			name <- '@Model'
+--			"module" <- auxiliaryModule 	
+		),
+		metamodelSort : Maude!Sort(
+			name <- '@Metamodel'
+--			"module" <- auxiliaryModule 	
+		),
+		stringSort : Maude!Sort(
+			name <- 'String'
+--			"module" <- auxiliaryModule 	
+		),
+		intSort : Maude!Sort(
+			name <- 'Int'
+--			"module" <- auxiliaryModule 	
+		),
+		boolSort : Maude!Sort(
+			name <- 'Bool'
+--			"module" <- auxiliaryModule 	
+		),
+		floatSort : Maude!Sort(
+			name <- 'Float'
+--			"module" <- auxiliaryModule 	
+		),
+		dataTypeInstanceSort : Maude!Sort(
+			name <- '@DataTypeInstance'
+--			"module" <- auxiliaryModule 	
+		),
+		-- Se usa para el trato especial de los enumerados, sobre los que no funciona eClass()
+		enumLiteralSort : Maude!Sort(
+			name <- 'EEnumLiteral@ecore'
+--			"module" <- auxiliaryModule 	
+		),
+		-- TIPOS DE LAS REFERENCIAS (METAREFERENCIAS E INSTANCIAS)
+--		refSimpleSort : Maude!Sort(
+--			name <- '@ReferenceSimple',
+--			"module" <- auxiliaryModule 
+--		),
+--		refInstSimpleSort : Maude!Sort(
+--			name <- '@ReferenceInstanceSimple',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refListSort : Maude!Sort(
+--			name <- '@ReferenceList',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refInstListSort : Maude!Sort(
+--			name <- '@ReferenceInstanceList',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refSetSort : Maude!Sort(
+--			name <- '@ReferenceSet',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refInstSetSort : Maude!Sort(
+--			name <- '@ReferenceInstanceSet',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refBagSort : Maude!Sort(
+--			name <- '@ReferenceBag',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refInstBagSort : Maude!Sort(
+--			name <- '@ReferenceInstanceBag',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refOrderedSetSort : Maude!Sort(
+--			name <- '@ReferenceOrderedSet',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refInstOrderedSetSort : Maude!Sort(
+--			name <- '@ReferenceInstanceOrderedSet',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refMaybeSort : Maude!Sort(
+--			name <- '@ReferenceMaybe',
+--			"module" <- auxiliaryModule 	
+--		),
+--		refInstMaybeSort : Maude!Sort(
+--			name <- '@ReferenceInstanceMaybe',
+--			"module" <- auxiliaryModule 	
+--		),
+--		oidSetSort : Maude!Sort(
+--			name <- 'Set{Oid}',
+--			"module" <- auxiliaryModule 	
+--		),
+--		oidListSort : Maude!Sort(
+--			name <- 'List{Oid}',
+--			"module" <- auxiliaryModule 	
+--		),
+--		oidBagSort : Maude!Sort(
+--			name <- 'Bag{Oid}',
+--			"module" <- auxiliaryModule 	
+--		),
+--		oidOrderedSetSort : Maude!Sort(
+--			name <- 'OrderedSet{Oid}',
+--			"module" <- auxiliaryModule 	
+--		),
+--		oidMaybeSort : Maude!Sort(
+--			name <- 'Maybe{Oid}',
+--			"module" <- auxiliaryModule 	
+--		),
+		oidSort : Maude!Sort(
+			name <- 'Oid'
+--			"module" <- auxiliaryModule 	
+		),
+		-- TIPOS DE LOS ATRIBUTOS (METAATRIBUTOS E INSTANCIAS)
+--		attSimpleSort : Maude!Sort(
+--			name <- '@AttributeSimple',
+--			"module" <- auxiliaryModule 
+--		),
+--		attInstSimpleSort : Maude!Sort(
+--			name <- '@AttributeInstanceSimple',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attListSort : Maude!Sort(
+--			name <- '@AttributeList',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attInstListSort : Maude!Sort(
+--			name <- '@AttributeInstanceList',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attSetSort : Maude!Sort(
+--			name <- '@AttributeSet',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attInstSetSort : Maude!Sort(
+--			name <- '@AttributeInstanceSet',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attBagSort : Maude!Sort(
+--			name <- '@AttributeBag',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attInstBagSort : Maude!Sort(
+--			name <- '@AttributeInstanceBag',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attOrderedSetSort : Maude!Sort(
+--			name <- '@AttributeOrderedSet',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attInstOrderedSetSort : Maude!Sort(
+--			name <- '@AttributeInstanceOrderedSet',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attMaybeSort : Maude!Sort(
+--			name <- '@AttributeMaybe',
+--			"module" <- auxiliaryModule 	
+--		),
+--		attInstMaybeSort : Maude!Sort(
+--			name <- '@AttributeInstanceMaybe',
+--			"module" <- auxiliaryModule 	
+--		),
+		orderedSetSort : Maude!Sort(
+			name <- 'OrderedSet'
+--			"module" <- auxiliaryModule 	
+		),
+		setSort : Maude!Sort(
+			name <- 'Set'
+--			"module" <- auxiliaryModule 	
+		),
+		sequenceSort : Maude!Sort(
+			name <- 'Sequence'
+--			"module" <- auxiliaryModule 	
+		),
+		bagSort : Maude!Sort(
+			name <- 'Bag'
+--			"module" <- auxiliaryModule 	
+		),
+		listSort : Maude!Sort(
+			name <- 'List{OCL-Exp}'
+--			"module" <- auxiliaryModule 	
+		),
+		mSetSort : Maude!Sort(
+			name <- 'MSet{OCL-Exp}'
+--			"module" <- auxiliaryModule 	
+		),
+--		listOrdSort : Maude!Sort(
+--			name <- 'ListOrd',
+--			"module" <- auxiliaryModule 	
+--		),
+		attInstanceSort : Maude!Sort(
+			name <- 'AttributeInstance'
+--			"module" <- auxiliaryModule 	
+		),
+		refInstanceSort : Maude!Sort(
+			name <- 'ReferenceInstance'
+--			"module" <- auxiliaryModule 	
+		),
+		attSort : Maude!Sort(
+			name <- '@Attribute'
+--			"module" <- auxiliaryModule 	
+		),
+		refSort : Maude!Sort(
+			name <- '@Reference'
+--			"module" <- auxiliaryModule 	
+		),
+		itemListOrdSort : Maude!Sort(
+			name <- 'ItemListOrd'
+--			"module" <- auxiliaryModule 	
+		),
+		itemListSort : Maude!Sort(
+			name <- 'ItemList'
+--			"module" <- auxiliaryModule 	
+		)
+	do{
+		thisModule.objectSort <- objectSort;
+		thisModule.objectSetSort <- objectSetSort;
+		thisModule.objSet <- objSet;
+		thisModule.sfiSetSort <- sfiSetSort; 
+--		thisModule.refSimpleSort <- refSimpleSort; 
+--		thisModule.refInstSimpleSort <- refInstSimpleSort;
+--		thisModule.refListSort <- refListSort;
+--		thisModule.refInstListSort <- refInstListSort;
+--		thisModule.refSetSort <- refSetSort; 
+--		thisModule.refInstSetSort <- refInstSetSort; 
+--		thisModule.refBagSort <- refBagSort ;
+--		thisModule.refInstBagSort <- refInstBagSort ;
+--		thisModule.refOrderedSetSort <- refOrderedSetSort; 
+--		thisModule.refInstOrderedSetSort <- refInstOrderedSetSort;
+--		thisModule.refMaybeSort <- refMaybeSort ;
+--		thisModule.refInstMaybeSort <- refInstMaybeSort;
+--		thisModule.attSimpleSort <- attSimpleSort; 
+--		thisModule.attInstSimpleSort <- attInstSimpleSort;
+--		thisModule.attListSort <- attListSort;
+--		thisModule.attInstListSort <- attInstListSort;
+--		thisModule.attSetSort <- attSetSort; 
+--		thisModule.attInstSetSort <- attInstSetSort; 
+--		thisModule.attBagSort <- attBagSort ;
+--		thisModule.attInstBagSort <- attInstBagSort ;
+--		thisModule.attOrderedSetSort <- attOrderedSetSort; 
+--		thisModule.attInstOrderedSetSort <- attInstOrderedSetSort;
+--		thisModule.attMaybeSort <- attMaybeSort ;
+--		thisModule.attInstMaybeSort <- attInstMaybeSort;
+		thisModule.enumLiteralSort <- enumLiteralSort;
+--		thisModule.oidSetSort <- oidSetSort;
+--		thisModule.oidListSort <- oidListSort ;
+--		thisModule.oidBagSort <- oidBagSort;
+--		thisModule.oidOrderedSetSort <-oidOrderedSetSort;
+--		thisModule.oidMaybeSort <- oidMaybeSort;
+		thisModule.oidSort <- oidSort;
+		thisModule.metamodelModule <- metamodelModule;
+--		thisModule.auxiliaryModule <- auxiliaryModule;
+		thisModule.stringSort <- stringSort; 
+		thisModule.intSort <- intSort;
+		thisModule.boolSort <- boolSort;
+		thisModule.floatSort <- floatSort;
+		thisModule.dataTypeInstanceSort <- dataTypeInstanceSort;
+		thisModule.orderedSetSort <- orderedSetSort;
+		thisModule.setSort <- setSort;
+		thisModule.sequenceSort <- sequenceSort;
+		thisModule.bagSort <- bagSort;
+		thisModule.listSort <- listSort;
+		thisModule.mSetSort <- mSetSort;
+		--thisModule.listOrdSort <- listOrdSort;
+		thisModule.attInstanceSort <- attInstanceSort;
+		thisModule.refInstanceSort <- refInstanceSort;
+		thisModule.refSort <- refSort;
+		thisModule.attSort <- attSort;
+		thisModule.itemListOrdSort <- itemListOrdSort;
+		thisModule.itemListSort <- itemListSort;
+	}
+}
+
+rule Object{
+	from
+		o : MM!EObject
+	to
+--		oid : Maude!Constant(
+--			op <- thisModule.cont.toString(),--o.oid(),
+--			type <- thisModule.oidSort
+--		),
+		obj : Maude!RecTerm (
+			op <- thisModule.objectOperator,
+			type <- thisModule.objectSort,
+			args <- Sequence{thisModule.MaudeOid(o),class,sfs}
+		),
+		class : Maude!Constant(
+			op <- o.eClass().maudeClassifierName(),
+			type <- thisModule.MaudeClassSort(o.eClass())
+		),
+		sfs : Maude!RecTerm(
+			op <- thisModule.setSfsOperator,
+			type <- thisModule.sfiSetSort,
+			args <- o.atts()->collect(a|if a.isMany() then thisModule.MaudeAttributeInstance(o,a)
+										else thisModule.MaudeAttributeInstanceSimple(o,a)
+										endif)
+				->union(o.refs()->collect(r|if r.isMany() then thisModule.MaudeReferenceInstance(o,r)
+										else thisModule.MaudeReferenceInstanceSimple(o,r)
+										endif))
+										--thisModule.MaudeReferenceInstance(o,r)))
+				->union(Sequence{emptySfs1, emptySfs2})
+		),
+		--Ya que suponemos que siempre va a haber un conjunto de structural features (_,_),
+		--a�adimos dos elementos vacios (empty) por si no tuviera ningun atributo o referencia un objeto
+		emptySfs1 : Maude!Constant(
+			op <- thisModule.emptySetOperator, 	
+			type <- thisModule.sfiSetSort
+		),
+		emptySfs2 : Maude!Constant(
+			op <- thisModule.emptySetOperator, 	
+			type <- thisModule.sfiSetSort
+		)
+	do{
+--		'Ahora'->println();	
+--		o.eClass().getEPackage().toString()->println();
+		thisModule.objSet.args <- thisModule.objSet.args->append(obj);
+	}
+}
+
+-- Realiza la misma funcion que la regla Object (pero en lazy)
+-- 	Usada para los objetos referenciados que estan fuera del modelo,
+--  tales como los tipos (Estring ) y factorias de Ecore
+unique lazy rule externalObject{
+	from
+		o : MM!EObject
+	to
+--		oid : Maude!Constant(
+--			op <- thisModule.cont.toString(),--o.oid(),
+--			type <- thisModule.oidSort
+--		),
+		obj : Maude!RecTerm (
+			op <- thisModule.objectOperator,
+			type <- thisModule.objectSort,
+			args <- Sequence{thisModule.MaudeOid(o),class,sfs}
+		),
+		class : Maude!Constant(
+			--- eClass no funciona para los enumliterals
+			op <- o.eClass().maudeClassifierName(), 
+			type <- thisModule.MaudeClassSort(o.eClass())
+		),
+		sfs : Maude!RecTerm(
+			op <- thisModule.setSfsOperator,
+			type <- thisModule.sfiSetSort,
+			args <- o.atts()
+				-- ->collect(a|thisModule.MaudeAttributeInstance(o,a))
+				->collect(a|if a.isMany() then thisModule.MaudeAttributeInstance(o,a)
+										else thisModule.MaudeAttributeInstanceSimple(o,a)
+										endif)
+				-- Descratamos las referencias para no hacer las transformaciones casi infinitas en algunos casos
+--				->union
+--				(o.refs() 
+--				->collect(r|thisModule.MaudeReferenceInstance(o,r)))
+				->union(Sequence{emptySfs1, emptySfs2})
+		),
+		--Ya que suponemos que siempre va a haber un conjunto de structural features (_,_),
+		--a�adimos dos elementos vacios (empty) por si no tuviera ningun atributo o referencia un objeto
+		emptySfs1 : Maude!Constant(
+			op <- thisModule.emptySetOperator, 	
+			type <- thisModule.sfiSetSort
+		),
+		emptySfs2 : Maude!Constant(
+			op <- thisModule.emptySetOperator,
+			type <- thisModule.sfiSetSort
+		)
+	do{
+		thisModule.objSet.args <- thisModule.objSet.args->append(obj);
+	}
+}
+
+
+unique lazy rule enumLiteralExternalObject{
+	from
+		o : MM!EObject
+	to
+		obj : Maude!RecTerm (
+			op <- thisModule.objectOperator,
+			type <- thisModule.objectSort,
+			args <- Sequence{thisModule.MaudeOid(o),class,sfs}
+		),
+		class : Maude!Constant(
+			op <- 'EEnumLiteral@ecore',
+			type <- thisModule.enumLiteralSort
+		),
+		sfs : Maude!RecTerm(
+			op <- thisModule.setSfsOperator,
+			type <- thisModule.sfiSetSort,
+			-- eGet No funciona para los EnumLiteral, asiq eu nada de atributos y referencias,
+			-- solo el que podemos obtener de otra forma (toString)
+			args <- Sequence{attName, emptySfs1}
+		),
+		emptySfs1 : Maude!Constant(
+			op <- thisModule.emptySetOperator, 	
+			type <- thisModule.sfiSetSort
+		),
+		attName : Maude!RecTerm(
+			op <- thisModule.sfsOperator,
+			type <-  thisModule.attInstanceSort,
+			args <- Sequence{nameDcl, nameValue}
+		),
+		nameDcl : Maude!Constant(
+			op <- 'name@ENamedElement@ecore',
+			type <- thisModule.attSort--thisModule.attMaybeSort
+		),
+		nameValue : Maude!Constant(
+			op <- '"' + o.toString() + '"',
+			type <- thisModule.stringSort
+		)
+	do{
+		thisModule.objSet.args <- thisModule.objSet.args->append(obj);
+	}
+}
+
+
+unique lazy rule MaudeClassSort{
+	from
+		c : MM!EClassiffier
+	to
+		classSort : Maude!Sort(
+			name <- c.maudeClassifierName(),
+			"module" <- thisModule.metamodelModule
+		)
+}
+
+lazy rule MaudeReferenceInstanceSimple{
+	from
+		o : MM!EObject,
+		r : MM!EReference --(not r.isMany())
+	to
+		ref : Maude!RecTerm(
+			op <- thisModule.sfsOperator, --'_:_'
+			type <- thisModule.refInstanceSort,
+			args <- if (o.oclType().toString() = 'MOF!EDataType' and (r.name = 'eAnnotations' or r.name = 'ePackage'))
+				then Sequence{thisModule.MaudeStructuralFeature(r),thisModule.MaudeOidUndefined(r)}
+				else
+					if (o.eGet(r).oclIsUndefined())--Indefinido o coleccion vacio
+					then Sequence{thisModule.MaudeStructuralFeature(r),thisModule.MaudeOidUndefined(r)}
+					else 
+						Sequence{thisModule.MaudeStructuralFeature(r),thisModule.CopyMaudeOid(thisModule.MaudeOid(o.eGet(r)))}
+					endif
+				endif
+		)
+}
+
+
+lazy rule MaudeReferenceInstance{
+	from
+		o : MM!EObject,
+		r : MM!EReference --(r.isMany())
+	to
+		ref : Maude!RecTerm(
+			op <- thisModule.sfsOperator,
+			type <- thisModule.refInstanceSort,--r.refInstanceKind(),
+			args <- Sequence{thisModule.MaudeStructuralFeature(r),collectionContainer}
+--				-- Decartamos las refs ePackage y eAnnotations de los datatypes de MOF  porque no funcionan bien (son uris parecen...)
+--				if (o.oclType().toString() = 'MOF!EDataType' and (r.name = 'eAnnotations' or r.name = 'ePackage'))
+--				then thisModule.MaudeOidUndefined(r)
+--				else
+--					if (o.eGet(r).oclIsUndefined() or o.eGet(r)->asSequence()->isEmpty())--Indefinido o coleccion vacio
+--					then thisModule.MaudeOidUndefined(r) 
+--					else if (o.eGet(r)->asSequence()->size() = 1) -- Un elemento (Coleccion o no)
+--						then thisModule.CopyMaudeOid(thisModule.MaudeOid(o.eGet(r)->asSequence()->first())) -- Coleccion de mas de un el.
+--						else thisModule.MaudeOidCollection(o,r) endif 
+--					endif
+--				endif}
+		),
+		collectionContainer : Maude!RecTerm(
+			op <- r.typeCollectionOperator(), --Sequence_ Bag_ ...
+			type <- r.typeCollection(),
+			--args <- container
+			args <- Sequence{
+				-- Decartamos las refs ePackage y eAnnotations de los datatypes de MOF  porque no funcionan bien (son uris parecen...)
+				if (o.oclType().toString() = 'MOF!EDataType' and (r.name = 'eAnnotations' or r.name = 'ePackage'))
+				then thisModule.MaudeOidUndefined(r)
+				else
+					if (o.eGet(r).oclIsUndefined())--Indefinido o coleccion vacio
+					then thisModule.MaudeOidUndefined(r) 
+					else if (o.eGet(r)->asSequence()->size() = 1) -- Un elemento (Coleccion o no)
+						then thisModule.CopyMaudeOid(thisModule.MaudeOid(o.eGet(r)->asSequence()->first())) -- Coleccion de mas de un el.
+						else thisModule.MaudeOidCollection(o,r) endif 
+					endif
+				endif}
+		)--,
+--		container : Maude!RecTerm(
+--			op <- r.typeCollectionContainerOperator(), --`[_`] o `{_`} 
+--			type <- r.typeCollectionContainer(),
+--			args <- Sequence{
+--				-- Decartamos las refs ePackage y eAnnotations de los datatypes de MOF  porque no funcionan bien (son uris parecen...)
+--				if (o.oclType().toString() = 'MOF!EDataType' and (r.name = 'eAnnotations' or r.name = 'ePackage'))
+--				then thisModule.MaudeOidUndefined(r)
+--				else
+--					if (o.eGet(r).oclIsUndefined() or o.eGet(r)->asSequence()->isEmpty())--Indefinido o coleccion vacio
+--					then thisModule.MaudeOidUndefined(r) 
+--					else if (o.eGet(r)->asSequence()->size() = 1) -- Un elemento (Coleccion o no)
+--						then thisModule.CopyMaudeOid(thisModule.MaudeOid(o.eGet(r)->asSequence()->first())) -- Coleccion de mas de un el.
+--						else thisModule.MaudeOidCollection(o,r) endif 
+--					endif
+--				endif}
+--		)
+	--do{
+		--o.eGet(r).oclType().toString()->println();
+		--o.eGet(r)->asSequence()->size().toString()->println();
+		--if(o.eGet(r).oclIsUndefined()){'true'->println();}else{'false'->println();}
+		--if((o.eGet(r)->asSequence()->size() = 1) and (r.name = 'eType')){
+			--if(o.eGet(r).eClass()){
+				--o.eGet(r).oclType().toString()->println();
+				--o.eGet(r)->asSequence()->first().name->println();
+			--}	
+		--}
+	--}
+}
+
+lazy rule MaudeStructuralFeature{
+	from
+		s : MM!EStructuralFeature
+	to
+		c : Maude!Constant(
+			op <- s.maudeStrFeatName(),
+			type <- if s.oclIsTypeOf(MM!EAttribute) then thisModule.attSort 
+					else thisModule.refSort
+					endif--s.attKind() else s.refKind() endif 
+		)
+}
+
+--Creamos el Oid solo una vez (uno para cada objeto)
+unique lazy rule MaudeOid{
+	from 
+		o : MM!EObject
+	to
+		c : Maude!Constant(
+			op <- 'oid(\'' + 
+				if(o.oclType().toString() = 'EnumLiteral' or not thisModule.allObjects->exists(i | i = o)) 
+				then  thisModule.cont.toString()
+				else 
+					-- No me sirve antecederle el nombre del modelo si luego voy a necesitar el propio modelo para obtener la referencia
+					-- Ademas por lo general supongo que los objetos dentro de un mismo modelo tienen identificadores distintos, 
+					--		pero no todos los objetos independientemente del modelo al que pertenezcan (por ejemplo en la diferencia manipulo identificadores)
+					--'platform:/resource' + thisModule.getParameter('filePath') + '#' + 
+					o.__xmiID__ --o.getElementID('IN')
+					-- 'platform:/resource' + MM!EObject.generateModelRef('IN') + '#' + o.__xmiID__
+				endif + ')'
+			,
+			type <- thisModule.oidSort	
+		)
+	do{
+		
+		-- Con los literales enumerados seguiremos usando los metodos antiguos de oid (contador)
+		-- Con los objetos externos tambien porque no tienen posicion en el modelo y devuelven todos -1 
+		-- (y por lo tanto si hubiera mas de un objeto externo tendrian todos el mismo identificador)
+		--		Esto ultimo puede que ses solucione con getElementID del AMWLoader (no se) pero este loader no funciona
+		--		con esta transformacion, pues parece ser que no carga el metamodelo Ecore siempre 
+		--		(y no encuentra MM!EObject al meterle como Ecore el MM al cual el modelo entrada es conforme)	
+			if(o.oclType().toString() = 'EnumLiteral' or not thisModule.allObjects->exists(i | i = o)){
+				thisModule.cont <- thisModule.cont + 1 ;
+			}
+--			-- Probando si los identificadores son creados correctamente
+--			else{
+--				if (thisModule.allObjects->exists(i | i = o)){
+--					--c.refSetValue('type', o);
+--					-- En el from no funciona porque no te cogeria o!!!Si no en lo que este se transforma!!
+--					c.refSetValue('type', MM!EClassifier.getInstanceById('IN', o.__xmiID__));
+--				}
+--			}
+			
+		if (not thisModule.allObjects->exists(i | i = o)){
+			if(o.oclType().toString() = 'EnumLiteral'){
+				-- EClass no funciona para los enumLiteral, y necesita un trato especial
+				thisModule.enumLiteralExternalObject(o);
+			}else{
+				thisModule.externalObject(o);
+			}
+		}
+	}
+}
+
+--Las referencias haran una copia del oid del objeto al que refieren
+--Al ser el MaudeOid unique, se asignara un identificador a cada objeto solo
+--De esta manera se puede recuperar el identificador del objeto (con resolveTemp no se podia)
+lazy rule CopyMaudeOid{
+	from 
+		cIn : Maude!Constant
+	to
+		cOut : Maude!Constant(
+			op <- cIn.op,
+			type <- cIn.type
+		)
+}
+
+lazy rule MaudeOidUndefined{
+	from 
+		r : MM!EReference
+	to
+		c : Maude!Constant(
+			op <- r.emptyCollection(),
+			type <- r.typeOfCollection()--r.oidKind()
+		)
+}
+
+lazy rule MaudeOidCollection{
+	from 
+		o : MM!EObject,
+		r : MM!EReference
+	to
+		rt : Maude!RecTerm(
+			op <- r.opCollection(),
+			type <- r.typeOfCollection(), --r.oidKind(),
+			args <- o.eGet(r)->collect(i | thisModule.CopyMaudeOid(thisModule.MaudeOid(i)))->union
+				(Sequence{thisModule.MaudeOidUndefined(r), thisModule.MaudeOidUndefined(r)})
+		)
+}
+
+lazy rule MaudeAttributeInstanceSimple{
+	from
+		o : MM!EObject,
+		a : MM!EAttribute --(not a.isMany())
+	to
+		ref : Maude!RecTerm(
+			op <- thisModule.sfsOperator, --'_:_'
+			type <- thisModule.attInstanceSort,
+			args <- 
+--				if (o.oclType().toString() = 'MOF!EDataType' and (r.name = 'eAnnotations' or r.name = 'ePackage'))
+--				then Sequence{thisModule.MaudeStructuralFeature(r),thisModule.MaudeOidUndefined(r)}
+--				else
+--					if (o.eGet(r).oclIsUndefined() or o.eGet(r)->asSequence()->isEmpty())--Indefinido o coleccion vacio
+--					then Sequence{thisModule.MaudeStructuralFeature(r),thisModule.MaudeOidUndefined(r)}
+--					else 
+--						Sequence{thisModule.MaudeStructuralFeature(r),thisModule.CopyMaudeOid(thisModule.MaudeOid(o.eGet(r)->asSequence()->first()))}
+--					endif
+--				endif				
+				if (a.eType.name = 'EJavaClass' or a.eType.name = 'EJavaObject' or a.eType.name = 'EEnumerator')
+				-- A los atts cuyo tipo sea EJavaClass (como los instanceClass de EClassifier y ETypeParamater) o EJavaObject
+				-- le damos el valor null, pues la funcion o.eGet(a) no funciona sobre ellos
+				then Sequence{thisModule.MaudeStructuralFeature(a),thisModule.MaudeAttUndefined(a)}
+				else
+					if (o.eGet(a).oclIsUndefined())--Indefinido o coleccion vacia
+					then Sequence{thisModule.MaudeStructuralFeature(a),thisModule.MaudeAttUndefined(a)}
+					else Sequence{thisModule.MaudeStructuralFeature(a),thisModule.MaudeDataType(o,a,1)} -- 1 elemento (coleccion o no)						
+					endif
+				endif
+		)
+}
+
+lazy rule MaudeAttributeInstance{
+	from
+		o : MM!EObject,
+		a : MM!EAttribute --(a.isMany())
+	to
+		att : Maude!RecTerm(
+			op <- thisModule.sfsOperator,
+			type <- thisModule.attInstanceSort, --a.attInstanceKind(),
+			args <- Sequence{thisModule.MaudeStructuralFeature(a), collectionContainer}
+--				-- Al atributo instanceClass de los MOF!DataType, MM!EDataType, MM!EEnum 
+--				-- le damos valor null porque no funciona el o.get(a)
+--				if (a.eType.name = 'EJavaClass' or a.eType.name = 'EJavaObject' or a.eType.name = 'EEnumerator')
+--				-- A los atts cuyo tipo sea EJavaClass (como los instanceClass de EClassifier y ETypeParamater) o EJavaObject
+--				-- le damos el valor null, pues la funcion o.eGet(a) no funciona sobre ellos
+--				then thisModule.MaudeAttUndefined(a)
+--				else
+--					if (o.eGet(a).oclIsUndefined() or o.eGet(a)->asSequence()->isEmpty())--Indefinido o coleccion vacia
+--					then thisModule.MaudeAttUndefined(a) 
+--					else if (o.eGet(a)->asSequence()->size() = 1) 
+--						then thisModule.MaudeDataType(o,a,1) -- 1 elemento (coleccion o no)
+--						else  thisModule.MaudeDataTypeCollection(o,a)  -- Coleccion de mas de un el.   
+--						endif
+--					endif
+--				endif
+--				}
+				),
+		collectionContainer : Maude!RecTerm(
+			op <- a.typeCollectionOperator(), --Sequence_ Bag_ ...
+			type <- a.typeCollection(),
+			--args <- container
+			args <- Sequence{
+				-- Al atributo instanceClass de los MOF!DataType, MM!EDataType, MM!EEnum 
+				-- le damos valor null porque no funciona el o.get(a)
+				if (a.eType.name = 'EJavaClass' or a.eType.name = 'EJavaObject' or a.eType.name = 'EEnumerator')
+				-- A los atts cuyo tipo sea EJavaClass (como los instanceClass de EClassifier y ETypeParamater) o EJavaObject
+				-- le damos el valor null, pues la funcion o.eGet(a) no funciona sobre ellos
+				then thisModule.MaudeAttUndefined(a)
+				else
+					if (o.eGet(a).oclIsUndefined() or o.eGet(a)->asSequence()->isEmpty())--Indefinido o coleccion vacia
+					then thisModule.MaudeAttUndefined(a) 
+					else if (o.eGet(a)->asSequence()->size() = 1) 
+						then thisModule.MaudeDataType(o,a,1) -- 1 elemento (coleccion o no)
+						else  thisModule.MaudeDataTypeCollection(o,a)  -- Coleccion de mas de un el.   
+						endif
+					endif
+				endif
+				}
+		)--,
+--		container : Maude!RecTerm(
+--			op <- a.typeCollectionContainerOperator(), --`[_`] o `{_`} 
+--			type <- a.typeCollectionContainer(),
+--			args <- Sequence{
+--				-- Al atributo instanceClass de los MOF!DataType, MM!EDataType, MM!EEnum 
+--				-- le damos valor null porque no funciona el o.get(a)
+--				if (a.eType.name = 'EJavaClass' or a.eType.name = 'EJavaObject' or a.eType.name = 'EEnumerator')
+--				-- A los atts cuyo tipo sea EJavaClass (como los instanceClass de EClassifier y ETypeParamater) o EJavaObject
+--				-- le damos el valor null, pues la funcion o.eGet(a) no funciona sobre ellos
+--				then thisModule.MaudeAttUndefined(a)
+--				else
+--					if (o.eGet(a).oclIsUndefined() or o.eGet(a)->asSequence()->isEmpty())--Indefinido o coleccion vacia
+--					then thisModule.MaudeAttUndefined(a) 
+--					else if (o.eGet(a)->asSequence()->size() = 1) 
+--						then thisModule.MaudeDataType(o,a,1) -- 1 elemento (coleccion o no)
+--						else  thisModule.MaudeDataTypeCollection(o,a)  -- Coleccion de mas de un el.   
+--						endif
+--					endif
+--				endif
+--				}
+--		)
+	--do{
+		--a.eType.name.println();
+		--a.name->println();
+		--o.eGet(a).oclType().toString()->println();
+		--o.eGet(a)->asSequence()->size().toString()->println();
+		--if(o.eGet(a).oclIsUndefined()){'true'->println();}else{'false'->println();}
+	--}
+}
+ 
+--lazy rule CreateAttCollectionContainer{
+--	from
+--		o : MM!EObject,
+--		a : MM!EAttribute	
+--	to
+--		container : Maude!RecTerm(
+--			op <- a.typeCollectionOperator()
+--			type <-
+--			arg <-
+--				-- Al atributo instanceClass de los MOF!DataType, MM!EDataType, MM!EEnum 
+--				-- le damos valor null porque no funciona el o.get(a)
+--				if (a.eType.name = 'EJavaClass' or a.eType.name = 'EJavaObject' or a.eType.name = 'EEnumerator')
+--				-- A los atts cuyo tipo sea EJavaClass (como los instanceClass de EClassifier y ETypeParamater) o EJavaObject
+--				-- le damos el valor null, pues la funcion o.eGet(a) no funciona sobre ellos
+--				then thisModule.MaudeAttUndefined(a)
+--				else
+--					if (o.eGet(a).oclIsUndefined() or o.eGet(a)->asSequence()->isEmpty())--Indefinido o coleccion vacia
+--					then thisModule.MaudeAttUndefined(a) 
+--					else if (o.eGet(a)->asSequence()->size() = 1) 
+--						then thisModule.MaudeDataType(o,a,1) -- 1 elemento (coleccion o no)
+--						else  thisModule.MaudeDataTypeCollection(o,a)  -- Coleccion de mas de un el.   
+--						endif
+--					endif
+--				endif
+--				}
+--		)
+--		
+--}
+
+--Se pasa el atributo y no el valor, porqeu no sabremos a priori que tipo sera
+--Entonces, el i es para poder llamarlo desde el que crea las colecciones
+--Aunque al final este llama a uno determinado para hacer los anidamientos...
+lazy rule MaudeDataType{
+	from 
+		o : MM!EObject,
+		a : MM!EAttribute,
+		i : Integer
+	using {
+		maudeBasicType : Maude!Sort = a.maudeBasicType();
+	}
+	to
+		c : Maude!Constant(
+			op <- if (maudeBasicType = thisModule.stringSort) 
+				-- as sequence porqeu puede entrar tanto un elemento como una coleccion de un elemento
+				then '"' +
+				  if o.eGet(a).oclIsKindOf(Collection(MM!EObject)) then
+						o.eGet(a)->asSequence()->at(i).escapeQuotes() + '"'
+					else
+						o.eGet(a).escapeQuotes() + '"'
+					endif
+				else if (a.getEType().oclIsTypeOf(MM!EEnum)) 
+					 then if (o.eGet(a).oclIsKindOf(Collection(MM!EObject)))
+					      then o.eGet(a)->asSequence()->at(i).maudeLiteralName(a.getEType()).processSpecOpChars()
+					      else o.eGet(a).maudeLiteralName(a.getEType()).processSpecOpChars()
+					      endif
+					 else
+						if o.eGet(a).oclIsKindOf(Collection(MM!EObject)) then
+					    o.eGet(a)->asSequence()->at(i).toString()
+						else
+							o.eGet(a).toString()
+						endif
+				   endif 
+				endif,
+			type <- maudeBasicType
+		)
+	do {
+--		if o.eGet(a). then 
+--					  o.eGet(a)->asSequence()->at(i).escapeQuotes() + '"'
+--					else
+--						o.escapeQuotes() + '"'
+	}
+}
+
+lazy rule MaudeAttUndefined{
+	from 
+		a : MM!EAttribute
+	using {
+		maudeType : Maude!Sort = thisModule.MaudeType(a);--a.maudeType();
+		defaultBasictValue : String = if (a.getDefaultValue().oclIsUndefined()) 
+								-- Para los tipos como los de KM3 que no tienen definido uno por defecto
+								then a.maudeBasicType().defaultValue()
+								else a.getDefaultValue().toString() endif;
+	}
+	to
+		c : Maude!Constant(
+			op <- if ((a.lowerBound= 1) and (a.upperBound= 1)) then 
+						if (maudeType = thisModule.stringSort) 
+						then '"' + defaultBasictValue + '"'
+						else defaultBasictValue 
+						endif
+				else a.emptyCollection() 
+				endif,
+			type <- if ((a.lowerBound= 1) and (a.upperBound= 1)) then maudeType
+					else a.typeOfCollection() 
+					endif					
+		)
+}
+
+lazy rule MaudeDataTypeCollection{
+	from 
+		o : MM!EObject,
+		a : MM!EAttribute
+	using {
+		maudeBasicType : Maude!Sort = a.maudeBasicType();
+	}
+	to
+		
+		rt : Maude!RecTerm(
+			op <- a.opCollection(),
+			--En este caso, como son tantos, en vez de crear todos y asignarle el tipo correcto
+			--lo que hacemos es crear el que nos haga falta
+			type <- a.typeOfCollection(),--thisModule.MaudeType(a),
+			--El reverse es usado porque al anidar luego las colecciones se invierte el orden, y es necesario presservarlo al final
+			args <- o.eGet(a)->asSequence()->collect
+				(val | thisModule.MaudeDataType(o,a,o.eGet(a)->asSequence()->indexOf(val)))->union
+				(Sequence{thisModule.MaudeAttUndefined(a), thisModule.MaudeAttUndefined(a)})
+		)
+}
+
+
+unique lazy rule MaudeType{
+	from 
+		a : MM!EAttribute
+	to
+		rt : Maude!Sort(
+			name <- a.maudeType(a.maudeBasicType().name),
+			"module" <- thisModule.auxiliaryModule
+		)
+}
+
+unique lazy rule enumerationSort{
+	from 
+		a : MM!EAttribute
+	to
+		rt : Maude!Sort(
+			name <- a.eType.maudeClassifierName() ,
+			"module" <- thisModule.auxiliaryModule
+		)
+}
